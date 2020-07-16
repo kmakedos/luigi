@@ -95,10 +95,7 @@ import time
 import sys
 import logging
 import random
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
+import pickle
 
 import luigi
 from luigi.contrib.hadoop import create_packages_archive
@@ -278,9 +275,11 @@ class SGEJobTask(luigi.Task):
                 d = pickle.dumps(self)
                 module_name = os.path.basename(sys.argv[0]).rsplit('.', 1)[0]
                 d = d.replace('(c__main__', "(c" + module_name)
-                open(self.job_file, "w").write(d)
+                with open(self.job_file, "w") as f:
+                    f.write(d)
             else:
-                pickle.dump(self, open(self.job_file, "w"))
+                with open(self.job_file, "wb") as f:
+                    pickle.dump(self, f)
 
     def _run_job(self):
 

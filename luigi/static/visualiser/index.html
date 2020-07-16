@@ -35,13 +35,14 @@
                 {{#error}}<button class="btn btn-warning btn-xs forgiveFailures" title="Forgive failures" data-toggle="tooltip"><i class="fa fa-ambulance"></i></button>{{/error}}
                 {{#re_enable}}<button class="btn btn-danger btn-xs showError" title="Show error" data-toggle="tooltip"><i class="fa fa-bug"></i></button>{{/re_enable}}
                 {{#re_enable}}<a class="btn btn-warning btn-xs re-enable-button" title="Re-enable" data-toggle="tooltip" data-task-id="{{taskId}}">Re-enable</a>{{/re_enable}}
+                {{#mark_as_done}}<a class="btn btn-success btn-xs markAsDone" title="Mark as done" data-toggle="tooltip" data-task-id="{{taskId}}"><i class="fa fa-fast-forward"></i></a>{{/mark_as_done}}
                 {{#trackingUrl}}<a target="_blank" href="{{trackingUrl}}" class="btn btn-primary btn-xs" title="Track Progress" data-toggle="tooltip"><i class="fa fa-eye"></i></a>{{/trackingUrl}}
                 {{#statusMessage}}<button class="btn btn-primary btn-xs statusMessage" title="Status message" data-toggle="tooltip" data-task-id="{{taskId}}" data-display-name="{{displayName}}"><i class="fa fa-comment"></i></button>{{/statusMessage}}
                 {{^statusMessage}}
                   {{#progressPercentage}}<button class="btn btn-primary btn-xs statusMessage" title="Status message" data-toggle="tooltip" data-task-id="{{taskId}}" data-display-name="{{displayName}}"><i class="fa fa-comment"></i></button>
                   {{/progressPercentage}}
                 {{/statusMessage}}
-                {{#acceptsMessages}}<button class="btn btn-success btn-xs schedulerMessage" title="Send message" data-toggle="tooltip" data-task-id="{{taskId}}" data-display-name="{{displayName}}" data-worker="{{workerIdRunning}}"><i class="fa fa-paper-plane"></i></button>{{/acceptsMessages}}
+                {{#acceptsMessages}}<button class="btn btn-default btn-xs schedulerMessage" title="Send message" data-toggle="tooltip" data-task-id="{{taskId}}" data-display-name="{{displayName}}" data-worker="{{workerIdRunning}}"><i class="fa fa-paper-plane"></i></button>{{/acceptsMessages}}
             </div>
         </script>
         <script type="text/template" name="errorTemplate">
@@ -213,6 +214,7 @@
                         <th>Name</th>
                         <th>Priority</th>
                         <th>Resources</th>
+                        <th>Progress</th>
                         <th>Time</th>
                         <th>Actions</th>
                       </thead>
@@ -222,8 +224,17 @@
                         <td>{{displayName}}</td>
                         <td>{{priority}}</td>
                         <td>{{resources}}</td>
+                        <td>
+                          {{#progressPercentage}}
+                          <div class="progress">
+                            <div class="progress-bar taskProgressBar" role="progressbar" data-task-id="{{taskId}}" style="width: {{progressPercentage}}%" aria-valuenow="{{progressPercentage}}" aria-valuemin="0" aria-valuemax="100">{{progressPercentage}}%</div>
+                          </div>
+                          {{/progressPercentage}}
+                          {{^progressPercentage}}-{{/progressPercentage}}
+                        </td>
                         <td>{{displayTime}}</td>
-                        <td><a href="#tab=graph&taskId={{encodedTaskId}}" class="btn btn-info btn-xs" title="View graph" data-toggle="tooltip" data-action="drawGraph"><i class="fa fa-sitemap"/></a>
+                        <td>
+                          <a href="#tab=graph&taskId={{encodedTaskId}}" class="btn btn-info btn-xs" title="View graph" data-toggle="tooltip" data-action="drawGraph"><i class="fa fa-sitemap"/></a>
                           {{#trackingUrl}}<a target="_blank" href="{{trackingUrl}}" class="btn btn-primary btn-xs" title="Track Progress" data-toggle="tooltip"><i class="fa fa-eye"></i></a>{{/trackingUrl}}
                           {{#statusMessage}}<button class="btn btn-primary btn-xs statusMessage" title="Status message" data-toggle="tooltip" data-task-id="{{taskId}}" data-display-name="{{displayName}}"><i class="fa fa-comment"></i></button>{{/statusMessage}}
                           {{^statusMessage}}
@@ -361,6 +372,14 @@
           </div>
         </script>
 
+        <script type="text/template" name="topNavbarItem">
+          <li>
+            <a class="js-nav-link" href="{{href}}" {{#dataTab}}data-tab="{{dataTab}}"{{/dataTab}}>
+              {{label}}
+            </a>
+          </li>
+        </script>
+
     </head>
     <body class="skin-green-light fixed">
         <div class="modal fade" id="errorModal" tabindex="-1" role="dialog" aria-labelledby="myModalLabel" aria-hidden="true">
@@ -387,7 +406,7 @@
                             </button>
                         </div>
                         <div class="collapse navbar-collapse">
-                            <ul class="nav navbar-nav">
+                            <ul class="nav navbar-nav" id="topNavbar">
                                 <li><a class="js-nav-link" href="#tab=tasks" data-tab="taskList">Task List</a></li>
                                 <li><a class="js-nav-link" href="#tab=graph" data-tab="dependencyGraph">Dependency Graph</a></li>
                                 <li><a class="js-nav-link" href="#tab=workers" data-tab="workerList">Workers</a></li>

@@ -22,28 +22,21 @@ See :doc:`/central_scheduler` for more info.
 """
 
 import collections
-try:
-    from collections.abc import MutableSet
-except ImportError:
-    from collections import MutableSet
+from collections.abc import MutableSet
 import json
 
 from luigi.batch_notifier import BatchNotifier
 
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
+import pickle
 import functools
 import hashlib
+import inspect
 import itertools
 import logging
 import os
 import re
 import time
 import uuid
-
-from luigi import six
 
 from luigi import configuration
 from luigi import notifications
@@ -102,12 +95,11 @@ def rpc_method(**request_args):
     def _rpc_method(fn):
         # If request args are passed, return this function again for use as
         # the decorator function with the request args attached.
-        fn_args = six.getargspec(fn)
-
-        assert not fn_args.varargs
-        assert fn_args.args[0] == 'self'
-        all_args = fn_args.args[1:]
-        defaults = dict(zip(reversed(all_args), reversed(fn_args.defaults or ())))
+        args, varargs, varkw, defaults, kwonlyargs, kwonlydefaults, ann = inspect.getfullargspec(fn)
+        assert not varargs
+        first_arg, *all_args = args
+        assert first_arg == 'self'
+        defaults = dict(zip(reversed(all_args), reversed(defaults or ())))
         required_args = frozenset(arg for arg in all_args if arg not in defaults)
         fn_name = fn.__name__
 
@@ -154,55 +146,14 @@ class scheduler(Config):
 
     metrics_collector = parameter.EnumParameter(enum=MetricsCollectors, default=MetricsCollectors.default)
 
+    stable_done_cooldown_secs = parameter.IntParameter(default=10,
+                                                       description="Sets cooldown period to avoid running the same task twice")
+    """
+    Sets a cooldown period in seconds after a task was completed, during this period the same task will not accepted by the scheduler.
+    """
+
     def _get_retry_policy(self):
         return RetryPolicy(self.retry_count, self.disable_hard_timeout, self.disable_window)
-
-
-class Failures(object):
-    """
-    This class tracks the number of failures in a given time window.
-
-    Failures added are marked with the current timestamp, and this class counts
-    the number of failures in a sliding time window ending at the present.
-    """
-
-    def __init__(self, window):
-        """
-        Initialize with the given window.
-
-        :param window: how long to track failures for, as a float (number of seconds).
-        """
-        self.window = window
-        self.failures = collections.deque()
-        self.first_failure_time = None
-
-    def add_failure(self):
-        """
-        Add a failure event with the current timestamp.
-        """
-        failure_time = time.time()
-
-        if not self.first_failure_time:
-            self.first_failure_time = failure_time
-
-        self.failures.append(failure_time)
-
-    def num_failures(self):
-        """
-        Return the number of failures in the window.
-        """
-        min_time = time.time() - self.window
-
-        while self.failures and self.failures[0] < min_time:
-            self.failures.popleft()
-
-        return len(self.failures)
-
-    def clear(self):
-        """
-        Clear the failure queue.
-        """
-        self.failures.clear()
 
 
 def _get_default(x, default):
@@ -280,7 +231,7 @@ class OrderedSet(MutableSet):
         return set(self) == set(other)
 
 
-class Task(object):
+class Task:
     def __init__(self, task_id, status, deps, resources=None, priority=0, family='', module=None,
                  params=None, param_visibilities=None, accepts_messages=False, tracking_url=None, status_message=None,
                  progress_percentage=None, retry_policy='notoptional'):
@@ -310,7 +261,8 @@ class Task(object):
         self.set_params(params)
         self.accepts_messages = accepts_messages
         self.retry_policy = retry_policy
-        self.failures = Failures(self.retry_policy.disable_window)
+        self.failures = collections.deque()
+        self.first_failure_time = None
         self.tracking_url = tracking_url
         self.status_message = status_message
         self.progress_percentage = progress_percentage
@@ -339,19 +291,45 @@ class Task(object):
             return False
 
     def add_failure(self):
-        self.failures.add_failure()
+        """
+        Add a failure event with the current timestamp.
+        """
+        failure_time = time.time()
+
+        if not self.first_failure_time:
+            self.first_failure_time = failure_time
+
+        self.failures.append(failure_time)
+
+    def num_failures(self):
+        """
+        Return the number of failures in the window.
+        """
+        min_time = time.time() - self.retry_policy.disable_window
+
+        while self.failures and self.failures[0] < min_time:
+            self.failures.popleft()
+
+        return len(self.failures)
 
     def has_excessive_failures(self):
-        if self.failures.first_failure_time is not None:
-            if (time.time() >= self.failures.first_failure_time + self.retry_policy.disable_hard_timeout):
+        if self.first_failure_time is not None:
+            if time.time() >= self.first_failure_time + self.retry_policy.disable_hard_timeout:
                 return True
 
-        logger.debug('%s task num failures is %s and limit is %s', self.id, self.failures.num_failures(), self.retry_policy.retry_count)
-        if self.failures.num_failures() >= self.retry_policy.retry_count:
+        logger.debug('%s task num failures is %s and limit is %s', self.id, self.num_failures(), self.retry_policy.retry_count)
+        if self.num_failures() >= self.retry_policy.retry_count:
             logger.debug('%s task num failures limit(%s) is exceeded', self.id, self.retry_policy.retry_count)
             return True
 
         return False
+
+    def clear_failures(self):
+        """
+        Clear the failures history
+        """
+        self.failures.clear()
+        self.first_failure_time = None
 
     @property
     def pretty_id(self):
@@ -359,7 +337,7 @@ class Task(object):
         return u'{}({})'.format(self.family, param_str)
 
 
-class Worker(object):
+class Worker:
     """
     Structure for tracking worker activity and keeping their references.
     """
@@ -394,9 +372,9 @@ class Worker(object):
         num_self_tasks = len(self.tasks)
         num_state_tasks = sum(len(state._status_tasks[status]) for status in statuses)
         if num_self_tasks < num_state_tasks:
-            return six.moves.filter(lambda task: task.status in statuses, self.tasks)
+            return filter(lambda task: task.status in statuses, self.tasks)
         else:
-            return six.moves.filter(lambda task: self.id in task.workers, state.get_active_tasks_by_status(*statuses))
+            return filter(lambda task: self.id in task.workers, state.get_active_tasks_by_status(*statuses))
 
     def is_trivial_worker(self, state):
         """
@@ -437,9 +415,9 @@ class Worker(object):
         return self.id
 
 
-class SimpleTaskState(object):
+class SimpleTaskState:
     """
-    Keep track of the current state and handle persistance.
+    Keep track of the current state and handle persistence.
 
     The point of this class is to enable other ways to keep state, eg. by using a database
     These will be implemented by creating an abstract base class that this and other classes
@@ -484,16 +462,16 @@ class SimpleTaskState(object):
 
             self.set_state(state)
             self._status_tasks = collections.defaultdict(dict)
-            for task in six.itervalues(self._tasks):
+            for task in self._tasks.values():
                 self._status_tasks[task.status][task.id] = task
         else:
             logger.info("No prior state file exists at %s. Starting with empty state", self._state_path)
 
     def get_active_tasks(self):
-        return six.itervalues(self._tasks)
+        return self._tasks.values()
 
     def get_active_tasks_by_status(self, *statuses):
-        return itertools.chain.from_iterable(six.itervalues(self._status_tasks[status]) for status in statuses)
+        return itertools.chain.from_iterable(self._status_tasks[status].values() for status in statuses)
 
     def get_active_task_count_for_status(self, status):
         if status:
@@ -534,10 +512,10 @@ class SimpleTaskState(object):
 
     def re_enable(self, task, config=None):
         task.scheduler_disable_time = None
-        task.failures.clear()
+        task.clear_failures()
         if config:
             self.set_status(task, FAILED, config)
-            task.failures.clear()
+            task.clear_failures()
 
     def set_batch_running(self, task, batch_id, worker_id):
         self.set_status(task, BATCH_RUNNING)
@@ -581,7 +559,7 @@ class SimpleTaskState(object):
                         'disabled for {persist} seconds'.format(
                             failures=task.retry_policy.retry_count,
                             task=task.id,
-                            window=config.disable_window,
+                            window=task.retry_policy.disable_window,
                             persist=config.disable_persist,
                         ))
         elif new_status == DISABLED:
@@ -639,7 +617,7 @@ class SimpleTaskState(object):
             self._status_tasks[task_obj.status].pop(task)
 
     def get_active_workers(self, last_active_lt=None, last_get_work_gt=None):
-        for worker in six.itervalues(self._active_workers):
+        for worker in self._active_workers.values():
             if last_active_lt is not None and worker.last_active >= last_active_lt:
                 continue
             last_get_work = worker.last_get_work
@@ -685,7 +663,7 @@ class SimpleTaskState(object):
             self._metrics_collector.handle_task_failed(task)
 
 
-class Scheduler(object):
+class Scheduler:
     """
     Async scheduler that can handle multiple workers, etc.
 
@@ -800,6 +778,19 @@ class Scheduler(object):
         return {"task_id": task_id, "status": task.status}
 
     @rpc_method()
+    def mark_as_done(self, task_id=None):
+        status = DONE
+        task = self._state.get_task(task_id)
+        if task is None:
+            return {"task_id": task_id, "status": None}
+
+        # we can force mark DONE for running or failed tasks
+        if task.status in {RUNNING, FAILED, DISABLED}:
+            self._update_task_history(task, status)
+            self._state.set_status(task, status, self._config)
+        return {"task_id": task_id, "status": task.status}
+
+    @rpc_method()
     def add_task(self, task_id=None, status=PENDING, runnable=True,
                  deps=None, new_deps=None, expl=None, resources=None,
                  priority=0, family='', module=None, params=None, param_visibilities=None, accepts_messages=False,
@@ -834,6 +825,10 @@ class Scheduler(object):
         task = self._state.get_task(task_id, setdefault=_default_task)
 
         if task is None or (task.status != RUNNING and not worker.enabled):
+            return
+
+        # Ignore claims that the task is PENDING if it very recently was marked as DONE.
+        if status == PENDING and task.status == DONE and (time.time() - task.updated) < self._config.stable_done_cooldown_secs:
             return
 
         # for setting priority, we'll sometimes create tasks with unset family and params
@@ -894,7 +889,7 @@ class Scheduler(object):
             if batched_params:
                 unbatched_params = {
                     param: value
-                    for param, value in six.iteritems(task.params)
+                    for param, value in task.params.items()
                     if param not in batched_params
                 }
             else:
@@ -948,7 +943,7 @@ class Scheduler(object):
         if batched_params:
             unbatched_params = {
                 param: value
-                for param, value in six.iteritems(params)
+                for param, value in params.items()
                 if param not in batched_params
             }
         else:
@@ -993,6 +988,10 @@ class Scheduler(object):
         return {"response": response}
 
     @rpc_method()
+    def has_task_history(self):
+        return self._config.record_task_history
+
+    @rpc_method()
     def is_pause_enabled(self):
         return {'enabled': self._config.pause_enabled}
 
@@ -1025,7 +1024,7 @@ class Scheduler(object):
 
     def _generate_retry_policy(self, task_retry_policy_dict):
         retry_policy_dict = self._config._get_retry_policy()._asdict()
-        retry_policy_dict.update({k: v for k, v in six.iteritems(task_retry_policy_dict) if v is not None})
+        retry_policy_dict.update({k: v for k, v in task_retry_policy_dict.items() if v is not None})
         return RetryPolicy(**retry_policy_dict)
 
     def _has_resources(self, needed_resources, used_resources):
@@ -1033,7 +1032,7 @@ class Scheduler(object):
             return True
 
         available_resources = self._resources or {}
-        for resource, amount in six.iteritems(needed_resources):
+        for resource, amount in needed_resources.items():
             if amount + used_resources[resource] > available_resources.get(resource, 1):
                 return False
         return True
@@ -1044,7 +1043,7 @@ class Scheduler(object):
             for task in self._state.get_active_tasks_by_status(RUNNING):
                 resources_running = getattr(task, "resources_running", task.resources)
                 if resources_running:
-                    for resource, amount in six.iteritems(resources_running):
+                    for resource, amount in resources_running.items():
                         used_resources[resource] += amount
         return used_resources
 
@@ -1193,7 +1192,7 @@ class Scheduler(object):
 
             if task.status == RUNNING and (task.worker_running in greedy_workers):
                 greedy_workers[task.worker_running] -= 1
-                for resource, amount in six.iteritems((getattr(task, 'resources_running', task.resources) or {})):
+                for resource, amount in (getattr(task, 'resources_running', task.resources) or {}).items():
                     greedy_resources[resource] += amount
 
             if self._schedulable(task) and self._has_resources(task.resources, greedy_resources):
@@ -1222,7 +1221,7 @@ class Scheduler(object):
                             greedy_workers[task_worker] -= 1
 
                             # keep track of the resources used in greedy scheduling
-                            for resource, amount in six.iteritems((task.resources or {})):
+                            for resource, amount in (task.resources or {}).items():
                                 greedy_resources[resource] += amount
 
                             break
@@ -1507,12 +1506,12 @@ class Scheduler(object):
                 name=resource,
                 num_total=r_dict['total'],
                 num_used=r_dict['used']
-            ) for resource, r_dict in six.iteritems(self.resources())]
+            ) for resource, r_dict in self.resources().items()]
         if self._resources is not None:
             consumers = collections.defaultdict(dict)
             for task in self._state.get_active_tasks_by_status(RUNNING):
                 if task.status == RUNNING and task.resources:
-                    for resource, amount in six.iteritems(task.resources):
+                    for resource, amount in task.resources.items():
                         consumers[resource][task.id] = self._serialize_task(task.id, include_deps=False)
             for resource in resources:
                 tasks = consumers[resource['name']]
@@ -1524,7 +1523,7 @@ class Scheduler(object):
         ''' get total resources and available ones '''
         used_resources = self._used_resources()
         ret = collections.defaultdict(dict)
-        for resource, total in six.iteritems(self._resources):
+        for resource, total in self._resources.items():
             ret[resource]['total'] = total
             if resource in used_resources:
                 ret[resource]['used'] = used_resources[resource]
@@ -1607,7 +1606,7 @@ class Scheduler(object):
                 return
 
             def decrease(resources, decrease_resources):
-                for resource, decrease_amount in six.iteritems(decrease_resources):
+                for resource, decrease_amount in decrease_resources.items():
                     if decrease_amount > 0 and resource in resources:
                         resources[resource] = max(0, resources[resource] - decrease_amount)
 
